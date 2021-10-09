@@ -20,7 +20,7 @@ use quinn::{
     ServerConfigBuilder,
 };
 use rouille::Response;
-use tokio::runtime::Runtime;
+use tokio::{fs::File, io::AsyncWriteExt, runtime::Runtime};
 use tracing::{error, info, info_span, trace, warn};
 use tracing_futures::Instrument;
 
@@ -79,11 +79,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 )?;
 
                 let socket = Socket {
-                    index,
                     port,
-                    out_dir: Arc::clone(&out_dir),
                     connection_count,
-                    runtime,
+                    _runtime: runtime,
                 };
 
                 Ok::<_, Box<dyn Error + Send + Sync>>(socket)
@@ -109,16 +107,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             Response::text(format!("{}", servers[0].port))
         },
     );
-
-    Ok(())
 }
 
 struct Socket {
-    index: usize,
     port: u16,
-    out_dir: Arc<PathBuf>,
     connection_count: Arc<AtomicUsize>,
-    runtime: Runtime,
+    _runtime: Runtime,
 }
 
 fn spawn_socket(
@@ -229,15 +223,20 @@ async fn handle_transfer(
     );
     let mut recv_len = 0;
 
-    let mut out = Vec::with_capacity(file_length as usize);
-    unsafe {
-        out.set_len(file_length as usize);
-    }
+    let mut file = File::create(out_dir.join(file_name)).await?;
 
     let start = Instant::now();
 
-    while let Some(len) = recv.read(&mut out[recv_len..]).await? {
+    let mut buf = [0; 4096];
+    while let Some(len) = recv.read(&mut buf[..]).await? {
+        if len == 0 {
+            continue;
+        }
+
         recv_len += len;
+
+        file.write_all(&buf[0..len]).await?;
+        trace!("Wrote {} bytes", len);
     }
 
     let end = start.elapsed();
@@ -251,8 +250,6 @@ async fn handle_transfer(
         end,
         (file_length as f64 / (1024.0 * 1024.0)) / end.as_secs_f64()
     );
-
-    // tokio::fs::write(out_dir.join(file_name), &out).await?;
 
     Ok(())
 }

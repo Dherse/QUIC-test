@@ -75,19 +75,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let len = len as usize;
 
-    let mut buf = Vec::with_capacity(len);
-    file.read_to_end(&mut buf).await?;
-
     let start = Instant::now();
 
-    let mut send_len = 0;
+    let mut buf = [0; 4096];
     loop {
-        let n = send.write(&buf[send_len..]).await?;
-        send_len += n;
-
-        if send_len == len {
+        let len = file.read(&mut buf).await?;
+        if len == 0 {
             break;
         }
+        
+        send.write_all(&buf[0..len]).await?;
     }
 
     let end = start.elapsed();
