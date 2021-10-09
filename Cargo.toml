@@ -11,7 +11,7 @@ lto = "fat"
 codegen-units = 1
 
 # Debug info in release build, does not impact performance
-debug = true
+debug = false
 
 # Optimization level, maximizes performance
 opt-level = 3
