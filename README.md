@@ -1,4 +1,4 @@
-# QUC-test
+# QUIC-test
 
 A simple file transfer client/server over QUIC. This is **not** secure and **not** production ready. I made this in a couple hours one evenning to try using [quinn](https://crates.io/crates/quinn) and [tokio](https://tokio.rs). It has simple logging/tracing, self-signed certificates, multiple concurrent transfers and multi-socket for higher performance.
 
