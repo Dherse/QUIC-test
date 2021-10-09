@@ -1,0 +1,56 @@
+[package]
+name = "quic-test"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+# Enable link-time optimization, eliminates more code and inlines across crate boundaries.
+lto = "fat"
+
+# Limits the number of threads to 1 to improve the level of optimization that may be achieved
+codegen-units = 1
+
+# Debug info in release build, does not impact performance
+debug = true
+
+# Optimization level, maximizes performance
+opt-level = 3
+
+# Panic abort leads to smaller and faster executables
+panic = "abort"
+
+[dependencies]
+# Asynchronous runtime
+tokio = { version = "1.0.1", features = [ "rt", "rt-multi-thread", "net", "fs", "macros", "parking_lot", "io-util" ]}
+futures-util = "0.3.17"
+
+# Faster but optional allocator
+mimalloc = { version = "0.1.26", default-features = false }
+
+# Tracing
+tracing = "0.1.29"
+tracing-subscriber = { version = "0.2.25", features = [ "chrono", "smallvec", "parking_lot" ] }
+tracing-futures = { version = "0.2.0", default-features = false, features = ["std-future"] }
+
+# Network protocol
+quinn = "0.7.2"
+
+# Certificate generator
+rcgen = "0.8"
+
+# CLI argument parsing
+clap = "3.0.0-beta.4"
+
+# Simple HTTP server for RR configuration
+rouille = "3.3.1"
+
+# HTTP request
+reqwest = "0.11.5"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
+
+[[bin]]
+name = "server"
+path = "src/server.rs"
