@@ -2,7 +2,7 @@ use std::{error::Error, net::IpAddr, path::PathBuf, time::Instant};
 
 use clap::{AppSettings, Clap};
 use mimalloc::MiMalloc;
-use quicc_test::{setup_logging, QUIC_PROTO};
+use quic_test::{setup_logging, QUIC_PROTO};
 use quinn::{Certificate, ClientConfigBuilder, Endpoint};
 use tokio::{fs::File, io::AsyncReadExt};
 use tracing::{info, trace};

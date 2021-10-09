@@ -14,7 +14,7 @@ use std::{
 use clap::{AppSettings, Clap};
 use futures_util::StreamExt;
 use mimalloc::MiMalloc;
-use quicc_test::{setup_logging, Size, QUIC_PROTO};
+use quic_test::{setup_logging, Size, QUIC_PROTO};
 use quinn::{
     Certificate, CertificateChain, Connecting, ConnectionError, Endpoint, PrivateKey, RecvStream,
     ServerConfigBuilder,
