@@ -10,7 +10,6 @@ use std::{
     time::Instant,
 };
 
-use bytes::Bytes;
 use clap::Parser;
 use mimalloc::MiMalloc;
 use quic_test::{setup_logging, Size, QUIC_PROTO};
