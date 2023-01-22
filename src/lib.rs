@@ -6,9 +6,8 @@ use std::{
 };
 
 use tracing::{warn, Level};
-use tracing_subscriber::fmt::time::ChronoLocal;
 
-pub const QUIC_PROTO: &[&[u8]] = &[b"qt-01"];
+pub const QUIC_PROTO: &[u8] = b"qt-01";
 
 pub fn setup_logging(verbose: u8) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     let level = match verbose {
@@ -23,7 +22,6 @@ pub fn setup_logging(verbose: u8) -> Result<(), Box<dyn Error + Send + Sync + 's
         .with_level(true)
         .with_max_level(level)
         .with_thread_names(true)
-        .with_timer(ChronoLocal::default())
         .try_init()?;
 
     if level > Level::WARN {

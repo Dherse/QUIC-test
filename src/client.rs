@@ -1,9 +1,10 @@
-use std::{error::Error, net::IpAddr, path::PathBuf, time::Instant};
+use std::{error::Error, net::IpAddr, path::PathBuf, time::Instant, sync::Arc};
 
-use clap::{AppSettings, Clap};
+use clap::Parser;
 use mimalloc::MiMalloc;
 use quic_test::{setup_logging, QUIC_PROTO};
-use quinn::{Certificate, ClientConfigBuilder, Endpoint};
+use quinn::{Endpoint};
+use rustls::{ClientConfig, Certificate, RootCertStore};
 use tokio::{fs::File, io::AsyncReadExt};
 use tracing::{info, trace};
 
@@ -16,33 +17,33 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     setup_logging(options.verbose)?;
 
-    let cert = setup_cert(options.cert).await?;
+    let mut roots = RootCertStore::empty();
+    roots.add(&setup_cert(options.cert).await?)?;
 
-    let mut client_config = ClientConfigBuilder::default();
-    client_config
-        .add_certificate_authority(cert)?
-        .protocols(QUIC_PROTO);
+    let mut client_config = ClientConfig::builder()
+        .with_safe_defaults()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
 
+    client_config.alpn_protocols = vec![ QUIC_PROTO.to_vec() ];
     if options.keylog {
-        client_config.enable_keylog();
+        client_config.key_log = Arc::new(rustls::KeyLogFile::new());
     }
 
-    let mut endpoint = Endpoint::builder();
-    endpoint.default_client_config(client_config.build());
-
-    let (endpoint, _) = endpoint.bind(&"[::]:0".parse()?)?;
+    let mut endpoint = Endpoint::client("[::]:0".parse()?)?;
+    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(client_config)));
 
     trace!("Getting port from http://[{}]:{}/", options.ip, options.port);
 
     let resp = reqwest::get(format!("http://[{}]:{}/", options.ip, options.port)).await?.text().await?.parse()?;
 
-    trace!("Got port {}", resp);
+    info!("Got port {}", resp);
 
     let new_conn = endpoint
-        .connect(&(options.ip, resp).into(), "localhost")?
+        .connect((options.ip, resp).into(), "localhost")?
         .await?;
 
-    let mut send = new_conn.connection.open_uni().await?;
+    let mut send = new_conn.open_uni().await?;
 
     let mut file = File::open(&options.file).await?;
     let name = options
@@ -77,7 +78,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let start = Instant::now();
 
-    let mut buf = [0; 4096];
+    let mut buf = [0; 40960];
     loop {
         let len = file.read(&mut buf).await?;
         if len == 0 {
@@ -103,16 +104,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 async fn setup_cert(
     cert_path: PathBuf,
 ) -> Result<Certificate, Box<dyn Error + Send + Sync + 'static>> {
-    Ok(Certificate::from_der(&tokio::fs::read(cert_path).await?)?)
+    Ok(Certificate(tokio::fs::read(cert_path).await?))
 }
 
 /// QUICCtest client CLI options
-#[derive(Clap, Clone)]
-#[clap(version = "0.1", author = "Dherse <seb@dherse.dev>")]
-#[clap(setting = AppSettings::ColoredHelp)]
+#[derive(Parser, Clone)]
+#[command(version = "0.1", author = "Dherse <seb@dherse.dev>")]
 pub struct CliOpt {
     /// A level of verbosity (not present = error only, -v = warnings, -vv = info, -vvv = debug, -vvvv = trace)
-    #[clap(short, long, parse(from_occurrences))]
+    #[clap(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
     /// Keylog the keys of the server

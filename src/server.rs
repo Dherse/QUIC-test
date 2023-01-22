@@ -1,6 +1,5 @@
 use std::{
     error::Error,
-    iter::once,
     mem::size_of,
     net::{Ipv6Addr, SocketAddr},
     path::PathBuf,
@@ -11,16 +10,16 @@ use std::{
     time::Instant,
 };
 
-use clap::{AppSettings, Clap};
-use futures_util::StreamExt;
+use bytes::Bytes;
+use clap::Parser;
 use mimalloc::MiMalloc;
 use quic_test::{setup_logging, Size, QUIC_PROTO};
 use quinn::{
-    Certificate, CertificateChain, Connecting, ConnectionError, Endpoint, PrivateKey, RecvStream,
-    ServerConfigBuilder,
+    Connecting, Endpoint, RecvStream,
 };
 use rouille::Response;
-use tokio::{fs::File, io::AsyncWriteExt, runtime::Runtime};
+use rustls::{PrivateKey, Certificate, ServerConfig};
+use tokio::{fs::File, io::{AsyncWriteExt, BufWriter}, runtime::Runtime};
 use tracing::{error, info, info_span, trace, warn};
 use tracing_futures::Instrument;
 
@@ -41,14 +40,14 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     trace!("Loaded/created certificate");
 
-    let mut server_config = ServerConfigBuilder::default();
-    server_config
-        .certificate(certs, key)?
-        .protocols(QUIC_PROTO)
-        .use_stateless_retry(options.stateless_retry);
+    let mut server_config = ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
 
+    server_config.alpn_protocols = vec![ QUIC_PROTO.to_vec() ];
     if options.keylog {
-        server_config.enable_keylog();
+        server_config.key_log = Arc::new(rustls::KeyLogFile::new());
     }
 
     trace!("Loaded server config");
@@ -121,7 +120,7 @@ fn spawn_socket(
     port: u16,
     out_dir: Arc<PathBuf>,
     connection_count: Arc<AtomicUsize>,
-    server_config: ServerConfigBuilder,
+    server_config: ServerConfig,
 ) -> Result<Runtime, Box<dyn Error + Send + Sync>> {
     let span = info_span!("socket", index = %index, port = %port);
 
@@ -131,18 +130,15 @@ fn spawn_socket(
         .enable_all()
         .build()?;
 
+    let server_config = quinn::ServerConfig::with_crypto(Arc::new(server_config));
     runtime.spawn(
             async move {
-                let mut endpoint = Endpoint::builder();
-                endpoint.listen(server_config.build());
-
-                let (_endpoint, mut incoming) =
-                    endpoint.bind(&SocketAddr::from((Ipv6Addr::LOCALHOST, port)))?;
+                let endpoint = Endpoint::server(server_config, format!("[::]:{port}").parse()?)?;
 
                 info!("Listening on [::1]:{}", port);
                 trace!("Created the endpoint");
 
-                while let Some(conn) = incoming.next().await {
+                while let Some(conn) = endpoint.accept().await {
                     info!("New connection: {:?}", conn.remote_address());
 
                     tokio::spawn(handle_connection(
@@ -166,26 +162,14 @@ async fn handle_connection(
     connecting: Connecting,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let span = info_span!("connection", remote = %connecting.remote_address());
-    let mut connection = connecting.await?;
+    let connection = connecting.await?;
 
-    // connection_count.fetch_add(1, Ordering::Relaxed);
+    connection_count.fetch_add(1, Ordering::Relaxed);
 
     async {
         info!("Established");
 
-        while let Some(stream) = connection.uni_streams.next().await {
-            let stream = match stream {
-                Ok(s) => s,
-                Err(ConnectionError::ApplicationClosed { .. }) => {
-                    connection_count.fetch_sub(1, Ordering::Relaxed);
-                    info!("Connection closed");
-                    return Ok(());
-                }
-                Err(e) => {
-                    return Err(e.into());
-                }
-            };
-
+        while let Ok(stream) = connection.accept_uni().await {
             tokio::spawn(
                 handle_transfer(out_dir.clone(), stream).instrument(info_span!("transfer")),
             );
@@ -223,20 +207,21 @@ async fn handle_transfer(
     );
     let mut recv_len = 0;
 
-    let mut file = File::create(out_dir.join(file_name)).await?;
+    let file = File::create(out_dir.join(file_name)).await?;
 
     let start = Instant::now();
 
-    let mut buf = [0; 4096];
-    while let Some(len) = recv.read(&mut buf[..]).await? {
-        if len == 0 {
+    let mut writer = BufWriter::new(file);
+
+    while let Some(chunk) = recv.read_chunk(std::usize::MAX, true).await? {
+        if chunk.bytes.len() == 0 {
             continue;
         }
 
-        recv_len += len;
+        recv_len += chunk.bytes.len();
 
-        file.write_all(&buf[0..len]).await?;
-        trace!("Wrote {} bytes", len);
+        writer.write_all(&chunk.bytes).await?;
+        trace!("Wrote {} bytes", chunk.bytes.len());
     }
 
     let end = start.elapsed();
@@ -257,13 +242,13 @@ async fn handle_transfer(
 fn setup_certs(
     key_path: Option<PathBuf>,
     cert_path: Option<PathBuf>,
-) -> Result<(PrivateKey, CertificateChain), Box<dyn Error + Send + Sync + 'static>> {
+) -> Result<(PrivateKey, Vec<Certificate>), anyhow::Error> {
     let (key, cert) = if let (Some(key_path), Some(cert_path)) = (&key_path, &cert_path) {
         (std::fs::read(key_path)?, std::fs::read(cert_path)?)
     } else {
         warn!("Using self-signed certificated");
 
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        let cert = rcgen::generate_simple_self_signed(vec![ "localhost".to_owned() ])?;
 
         let key = cert.serialize_private_key_der();
         let cert = cert.serialize_der()?;
@@ -275,27 +260,41 @@ fn setup_certs(
     };
 
     let key = if key_path.map_or(true, |p| p.extension().map_or(false, |x| x == "der")) {
-        PrivateKey::from_der(&key)?
+        PrivateKey(key)
     } else {
-        PrivateKey::from_pem(&key)?
+        let pkcs8 = rustls_pemfile::pkcs8_private_keys(&mut &*key)?;
+        match pkcs8.into_iter().next() {
+            Some(x) => rustls::PrivateKey(x),
+            None => {
+                let rsa = rustls_pemfile::rsa_private_keys(&mut &*key)?;
+                match rsa.into_iter().next() {
+                    Some(x) => rustls::PrivateKey(x),
+                    None => {
+                        anyhow::bail!("no private keys found");
+                    }
+                }
+            }
+        }
     };
 
-    let cert_chain = if cert_path.map_or(true, |p| p.extension().map_or(false, |x| x == "der")) {
-        CertificateChain::from_certs(once(Certificate::from_der(&cert)?))
+    let cert_chain = if cert_path.map_or(true, |c| c.extension().map_or(false, |x| x == "der")){
+        vec![rustls::Certificate(cert)]
     } else {
-        CertificateChain::from_pem(&cert)?
+        rustls_pemfile::certs(&mut &*cert)?
+            .into_iter()
+            .map(rustls::Certificate)
+            .collect()
     };
 
     Ok((key, cert_chain))
 }
 
 /// QUICCtest server CLI options
-#[derive(Clap, Clone)]
-#[clap(version = "0.1", author = "Dherse <seb@dherse.dev>")]
-#[clap(setting = AppSettings::ColoredHelp)]
+#[derive(Parser, Clone)]
+#[command(version = "0.1", author = "Dherse <seb@dherse.dev>")]
 pub struct CliOpt {
     /// A level of verbosity (not present = error only, -v = warnings, -vv = info, -vvv = debug, -vvvv = trace)
-    #[clap(short, long, parse(from_occurrences))]
+    #[clap(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
     /// TLS private key in PEM format, requires a `cert`
